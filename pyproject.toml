@@ -1,0 +1,61 @@
+[project]
+name = "gwascatalog.gene"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.11.1",
+]
+
+[dependency-groups]
+lint = [
+    "ruff>=0.9.4",
+    "mypy>=1.14.1"
+    ]
+test = [
+    "pytest>=8.3.4",
+    "pytest-coverage>=0.0",
+]
+
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "--doctest-modules"
+filterwarnings = ["error"]
+pythonpath = [
+  "src"
+]
+consider_namespace_packages = true
+
+[tool.coverage.run]
+source = ["src/gwascatalog/gene", "tests"]
+concurrency = ["multiprocessing"]
+parallel = true
+sigterm = true
+
+[tool.uv]
+default-groups = ["test", "lint"]
+
+[tool.mypy]
+# namespace package configuration
+mypy_path = "src"
+explicit_package_bases = true
+
+# https://careers.wolt.com/en/blog/tech/professional-grade-mypy-configuration
+disallow_untyped_defs = true
+disallow_any_unimported = true
+no_implicit_optional = true
+check_untyped_defs = true
+warn_return_any = true
+show_error_codes = true
+warn_unused_ignores = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
