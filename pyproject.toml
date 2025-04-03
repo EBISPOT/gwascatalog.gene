@@ -57,5 +57,7 @@ warn_return_any = true
 show_error_codes = true
 warn_unused_ignores = true
 
+exclude = ['scripts', 'tests']
+
 [tool.setuptools.packages.find]
 where = ["src"]
