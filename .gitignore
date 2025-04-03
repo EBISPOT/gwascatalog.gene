@@ -10,3 +10,6 @@ wheels/
 .venv
 
 .idea
+.DS_Store
+.coverage
+coverage.xml
