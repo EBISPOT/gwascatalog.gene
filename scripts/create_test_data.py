@@ -3,35 +3,28 @@
 # dependencies = [
 #     "duckdb",
 #     "requests",
+#     "tenacity"
 # ]
 # ///
 
 """Create test data from GWAS Catalog gene based submissions
 
-Manually curated pubmed IDs:
+Using a manually curated list, query the Catalog API with pubmed IDs and a bunch of GCST accessions (gcsts.txt).
 
-34662886
-36088354
-36596879
-37592023
-39180217
-39362880
-40021682
-40073867
-36450978
-37949852
-39385933* (window-based)
+- Test data are gzip compressed TSV files
+- These files contain roughly 5% of the original sumstat files
+- Written to the tests/data directory
 
-and a bunch of GCST accessions (gcsts.txt)
+Run this script with uv to automatically install the dependencies:
 
-Test data contains roughly 5% of the original files
+$ uv run create_test_data.py
 """
 
 import requests
 import duckdb
 import re
 import pathlib
-import time
+from tenacity import retry, wait_exponential
 
 PUBMED_IDS = [
     34662886,
@@ -47,11 +40,8 @@ PUBMED_IDS = [
 ]
 
 
-def fetch_study_links(pubmed_id):
-    """Get study links recursively from a pubmed ID
-
-    By default, only grab the first 100 GCSTs
-    """
+def get_gcst_from_pubmed(pubmed_id):
+    """Get a list of gene-based GCSTs from a pubmed id"""
     BASE_URL = (
         "https://www.ebi.ac.uk/gwas/rest/api/studies/search/findByPublicationIdPubmedId"
     )
@@ -73,15 +63,11 @@ def fetch_study_links(pubmed_id):
         response.raise_for_status()
         data = response.json()
 
-        # Extract matching studies
         studies = data.get("_embedded", {}).get("studies", [])
         for study in studies:
             disease_trait = study.get("diseaseTrait", {}).get("trait", "").lower()
             # magic strings that flag gene based sumstats in the trait field
-            if (
-                "gene-based" in disease_trait
-                or "gene burden" in disease_trait
-            ):
+            if "gene-based" in disease_trait or "gene burden" in disease_trait:
                 study_links.append(study["_links"]["self"]["href"])
 
         # Check if there are more pages
@@ -108,8 +94,9 @@ def get_directory_range(n):
     return lower, upper
 
 
+@retry(wait=wait_exponential(multiplier=1, min=2, max=10))  # (EBI load balancer)
 def make_ftp_url(gcst_url):
-    """Make an FTP url from a GCST accession:"""
+    """Make an FTP url that links to a sumstats directory from a GCST accession"""
     base_url = "http://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics"
 
     # Extract GCST ID (e.g., "GCST90082112")
@@ -131,33 +118,30 @@ def make_ftp_url(gcst_url):
     return full_url
 
 
+@retry(wait=wait_exponential(multiplier=1, min=2, max=10))  # (EBI load balancer)
 def get_tsv_url(url):
-    """Get a TSV file path (possibly gzip compressed) from a HTML directory listing
-
-    >>> url = "http://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST90081001-GCST90082000/GCST90081596"
-    >>> get_tsv_url(url)
-    http://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/GCST90081001-GCST90082000/GCST90081596/GCST90081596_buildGRCh38.tsv.gz
-    """
+    """Get a TSV URL (possibly gzip compressed) from an FTP directory listing"""
     response = requests.get(url)
     response.raise_for_status()
 
-    # Use regex to find all TSV links
+    # Use regex to find the first TSV link (there should only be one)
     try:
         tsv_file = re.findall(r'href="([^"]+\.(?:tsv\.gz|tsv))"', response.text)[0]
     except IndexError:
         raise ValueError(f"Couldn't find TSV file at {url}")
 
-    time.sleep(0.2)  # naive rate limit for EBI load balancer
     return url + "/" + tsv_file
 
 
-def sample_csv(path, outf, seed=42, overwrite=False):
-    """Reproducibly sample 5% of rows from a text file and write to outf"""
+def sample_csv(path, outf, overwrite=False):
+    """Reproducibly sample 5% of rows from a text file and write to a TSV"""
     if pathlib.Path(outf).exists() and not overwrite:
         print(f"File {outf} already exists, skipping")
     else:
         print(f"Writing {outf}")
         with duckdb.connect(":memory:") as conn:
+            # duckdb fetches the remote TSV and decompresses it magically
+            # seed = 42 for reproducibility
             sql = f"""
             COPY (SELECT * FROM read_csv(\"{path}\") 
             USING SAMPLE 5% (system, 42))        
@@ -167,8 +151,9 @@ def sample_csv(path, outf, seed=42, overwrite=False):
             conn.execute(sql)
 
 
-def get_sumstat_from_pubmed(pubmed_id):
-    links = fetch_study_links(pubmed_id)
+def get_sumstats_from_pubmed_id(pubmed_id):
+    """Query the Catalog API with a pubmed ID and download sampled sumstats files"""
+    links = get_gcst_from_pubmed(pubmed_id)
     test_data_path = pathlib.Path(__file__).parent.parent.resolve() / "tests" / "data"
     (test_data_path / str(pubmed_id)).mkdir(exist_ok=True, parents=True)
 
@@ -188,6 +173,7 @@ def read_gcsts():
 
 
 def get_sumstat_from_gcst(gcst):
+    """Query the Catalog API with a GCST accession and download sampled sumstats files"""
     test_data_path = (
         pathlib.Path(__file__).parent.parent.resolve() / "tests" / "data" / "gcsts"
     )
@@ -200,13 +186,15 @@ def get_sumstat_from_gcst(gcst):
 
 def main() -> None:
     for pubmed_id in PUBMED_IDS:
-        n_processed = get_sumstat_from_pubmed(pubmed_id)
+        n_processed = get_sumstats_from_pubmed_id(pubmed_id)
         if n_processed == 0:
+            # no GCSTs were found from a pubmed ID. that's bad!
             raise ValueError(f"No sumstats downloaded for {pubmed_id=}")
 
     gcsts = read_gcsts()
     for gcst in gcsts:
         get_sumstat_from_gcst(gcst)
+
 
 if __name__ == "__main__":
     main()
