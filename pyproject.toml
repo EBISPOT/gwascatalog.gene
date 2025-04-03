@@ -27,7 +27,7 @@ packages = ["src"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "--doctest-modules"
+addopts = "--doctest-modules --ignore=scripts"
 filterwarnings = ["error"]
 pythonpath = [
   "src"

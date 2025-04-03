@@ -42,3 +42,28 @@ jobs:
 
     - run: nox -s "${{ matrix.session }}"
       working-directory: ${{ inputs.package-directory }}
+
+  coverage:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up nox
+        uses: wntrblm/nox@main
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Make coverage report
+        run: nox -s coverage
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+            use_oidc: true
+            token: ${{ secrets.CODECOV_TOKEN }}
