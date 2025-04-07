@@ -10,6 +10,38 @@ on:
       - '**.py'
 
 jobs:
+  create-test-data:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Restore test data cache
+      id: restore-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: tests/data
+        key: ${{ runner.os }}-test-data
+
+    - name: Set up nox
+      if: steps.restore-cache.outputs.cache-hit != 'true'
+      uses: wntrblm/nox@main
+
+    - name: Install uv
+      if: steps.restore-cache.outputs.cache-hit != 'true'
+      uses: astral-sh/setup-uv@v5
+
+    - name: Create test data
+      if: steps.restore-cache.outputs.cache-hit != 'true'
+      run: nox -s create_test_data
+
+    - name: Cache test data
+      if: steps.restore-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: tests/data
+        key: ${{ runner.os }}-test-data
+
+
   generate-jobs:
     runs-on: ubuntu-latest
     outputs:
@@ -22,11 +54,10 @@ jobs:
     - id: set-matrix
       shell: bash
       run: echo session=$(nox --json -l | jq -c '[.[].session]') | tee --append $GITHUB_OUTPUT
-      working-directory: ${{ inputs.package-directory }}
 
   checks:
     name: Session ${{ matrix.session }}
-    needs: [generate-jobs]
+    needs: [generate-jobs, create-test-data]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -41,12 +72,18 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@v5
 
+    - name: Restore test data cache
+      uses: actions/cache/restore@v4
+      with:
+        path: tests/data
+        key: ${{ runner.os }}-test-data
+        fail-on-cache-miss: true
+
     - run: nox -s "${{ matrix.session }}"
-      working-directory: ${{ inputs.package-directory }}
 
   coverage:
     runs-on: ubuntu-latest
-
+    needs: [create-test-data]
     permissions:
       id-token: write
       contents: read
@@ -59,6 +96,13 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+
+      - name: Restore test data cache
+        uses: actions/cache/restore@v4
+        with:
+          path: tests/data
+          key: ${{ runner.os }}-test-data
+          fail-on-cache-miss: true
 
       - name: Make coverage report
         run: nox -s coverage
