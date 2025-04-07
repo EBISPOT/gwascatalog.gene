@@ -1,6 +1,10 @@
+import csv
 import pathlib
 
+from xopen import xopen
+
 import gwascatalog.gene
+import gwascatalog.gene.models as models
 import pytest
 
 
@@ -27,4 +31,9 @@ def get_test_data_files():
 
 @pytest.mark.parametrize("file_path", get_test_data_files())
 def test_sumstat(file_path):
-    assert file_path.exists()
+    with xopen(file_path) as fh:
+        genes = list(csv.DictReader(fh, delimiter="\t"))
+        for gene in genes:
+            # pydantic will raise validation errors
+            _ = models.GeneModel(**gene)
+
