@@ -3,7 +3,8 @@
 # dependencies = [
 #     "duckdb",
 #     "requests",
-#     "tenacity"
+#     "tenacity",
+#     "tqdm"
 # ]
 # ///
 
@@ -13,7 +14,7 @@ Using a manually curated list, query the Catalog API with pubmed IDs and a bunch
 
 - Test data are gzip compressed TSV files
 - These files contain 1000 rows from the original sumstat files
-- Sampled data is written to the tests/data directory
+- Written to the tests/data directory
 
 Run this script with uv to automatically install the dependencies:
 
@@ -35,6 +36,7 @@ import duckdb
 import re
 import pathlib
 from tenacity import retry, wait_exponential
+from tqdm import tqdm
 
 PUBMED_IDS = [
     34662886,
@@ -189,10 +191,13 @@ def sample_csv(path, outf, overwrite=False):
         os.close(fd)
         pathlib.Path(db_path).unlink()
 
-        with duckdb.connect(db_path) as conn:
+        with duckdb.connect(db_path) as con:
+            # github action error?
+            con.install_extension("httpfs")
+            con.load_extension("httpfs")
             # duckdb fetches the remote TSV and decompresses it magically
             # seed = 42 for reproducibility
-            conn.execute(sql)
+            con.execute(sql)
 
         pathlib.Path(db_path).unlink()
 
@@ -224,7 +229,7 @@ def download_sumstats(tsv_urls):
                     executor.submit(sample_csv, path=url, outf=outf, overwrite=False)
                 )
 
-        for future in concurrent.futures.as_completed(futures):
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
             _ = future.result()  # correctly raise exceptions
 
 
