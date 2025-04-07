@@ -1,6 +1,7 @@
 # type: ignore
 
 import nox
+import pathlib
 
 nox.options.error_on_external_run = True
 nox.options.default_venv_backend = "uv"
@@ -72,3 +73,14 @@ def build(session):
         env={"UV_PROJECT_ENVIRONMENT": session.virtualenv.location},
     )
     session.run("uv", "build")
+
+
+@nox.session(default=False)
+def create_test_data(session):
+    """Create test data from GWAS Catalog gene based summary statistic files samples"""
+    create_test_path = pathlib.Path(__file__).parent / "scripts" / "create_test_data.py"
+    session.run(
+        "uv",
+        "run",
+        str(create_test_path),
+    )

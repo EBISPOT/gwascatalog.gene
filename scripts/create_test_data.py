@@ -12,13 +12,23 @@
 Using a manually curated list, query the Catalog API with pubmed IDs and a bunch of GCST accessions (gcsts.txt).
 
 - Test data are gzip compressed TSV files
-- These files contain roughly 5% of the original sumstat files
-- Written to the tests/data directory
+- These files contain 1000 rows from the original sumstat files
+- Sampled data is written to the tests/data directory
 
 Run this script with uv to automatically install the dependencies:
 
 $ uv run create_test_data.py
+
+or if using nox in the main package directory:
+
+$ nox -s create_test_data
 """
+
+import concurrent.futures
+import gzip
+import json
+import os
+import tempfile
 
 import requests
 import duckdb
@@ -133,67 +143,130 @@ def get_tsv_url(url):
     return url + "/" + tsv_file
 
 
-def sample_csv(path, outf, overwrite=False):
-    """Reproducibly sample 5% of rows from a text file and write to a TSV"""
-    if pathlib.Path(outf).exists() and not overwrite:
-        print(f"File {outf} already exists, skipping")
-    else:
-        print(f"Writing {outf}")
-        with duckdb.connect(":memory:") as conn:
-            # duckdb fetches the remote TSV and decompresses it magically
-            # seed = 42 for reproducibility
-            sql = f"""
-            COPY (SELECT * FROM read_csv(\"{path}\") 
-            USING SAMPLE 5% (system, 42))        
-            TO \"{outf}\"
-            DELIMITER '\t';        
-            """
-            conn.execute(sql)
-
-
 def get_sumstats_from_pubmed_id(pubmed_id):
-    """Query the Catalog API with a pubmed ID and download sampled sumstats files"""
+    """Query the Catalog API with a pubmed ID and return the sumstat TSV URL"""
     links = get_gcst_from_pubmed(pubmed_id)
     test_data_path = pathlib.Path(__file__).parent.parent.resolve() / "tests" / "data"
     (test_data_path / str(pubmed_id)).mkdir(exist_ok=True, parents=True)
 
-    for link in links:
-        url = make_ftp_url(link)
-        tsv_url = get_tsv_url(url)
-        outf = str(test_data_path / str(pubmed_id) / f"{link.split("/")[-1]}.tsv.gz")
-        sample_csv(path=tsv_url, outf=outf)
-
-    return len(links)
-
-
-def read_gcsts():
-    with open("gcsts.txt") as f:
-        next(f)  # skip the header comment
-        return f.readlines()
+    urls = [make_ftp_url(link) for link in links]
+    return [get_tsv_url(url) for url in urls]
 
 
 def get_sumstat_from_gcst(gcst):
-    """Query the Catalog API with a GCST accession and download sampled sumstats files"""
-    test_data_path = (
-        pathlib.Path(__file__).parent.parent.resolve() / "tests" / "data" / "gcsts"
-    )
-    test_data_path.mkdir(exist_ok=True, parents=True)
+    """Query the Catalog API with a GCST accession return the sumstat TSV URL"""
     url = make_ftp_url(gcst)
-    tsv_url = get_tsv_url(url)
-    outf = str(test_data_path / f"{gcst.split('/')[-1].strip()}.tsv.gz")
-    sample_csv(path=tsv_url, outf=outf)
+    return get_tsv_url(url)
 
 
-def main() -> None:
-    for pubmed_id in PUBMED_IDS:
-        n_processed = get_sumstats_from_pubmed_id(pubmed_id)
-        if n_processed == 0:
-            # no GCSTs were found from a pubmed ID. that's bad!
-            raise ValueError(f"No sumstats downloaded for {pubmed_id=}")
+def is_sumstat_ok(outf):
+    """Sometimes sampled sumstat files get written with just a header :("""
+    with gzip.open(outf, "rt") as f:
+        n_lines = sum(1 for _ in f)
+        if n_lines < 2:
+            failed = True  # just a header or an empty file
+        else:
+            failed = False
+    return failed
 
-    gcsts = read_gcsts()
-    for gcst in gcsts:
-        get_sumstat_from_gcst(gcst)
+
+def sample_csv(path, outf, overwrite=False):
+    """Reproducibly sample rows from a text file and write to a TSV"""
+    outf_path = pathlib.Path(outf)
+
+    if outf_path.exists() and not overwrite:
+        print(f"File {outf} already exists, skipping")
+    else:
+        sql = f"""
+        COPY (SELECT * FROM read_csv(\"{path}\", sample_size = 100_000) 
+        USING SAMPLE reservoir(1000 ROWS) REPEATABLE (42))
+        TO \"{outf}\"
+        DELIMITER '\t';        
+        """
+        # only one memory database can exist a time
+        # need to get a temporary file name for the duckdb database that doesn't exist
+        fd, db_path = tempfile.mkstemp(prefix=outf_path.stem)
+        os.close(fd)
+        pathlib.Path(db_path).unlink()
+
+        with duckdb.connect(db_path) as conn:
+            # duckdb fetches the remote TSV and decompresses it magically
+            # seed = 42 for reproducibility
+            conn.execute(sql)
+
+        pathlib.Path(db_path).unlink()
+
+    failed = is_sumstat_ok(outf)
+
+    if failed:
+        print(f"Deleting bad sumstat file {path} and retrying")
+        pathlib.Path(outf).unlink()
+        raise ValueError(f"Empty output: {outf}")
+
+
+def download_sumstats(tsv_urls):
+    """Download and sample sumstats files in parallel"""
+    print("Downloading sumstats...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = []
+        for url_dict in tsv_urls:
+            # make the directory for the data
+            test_data_path = (
+                pathlib.Path(__file__).parent.parent.resolve() / "tests" / "data"
+            )
+            gwas_id = url_dict["id"]
+            (test_data_path / gwas_id).mkdir(exist_ok=True, parents=True)
+
+            for url in url_dict["urls"]:
+                basename = url.split("/")[-1].strip().split(".")[0]
+                outf = str(test_data_path / gwas_id / f"{basename}.tsv.gz")
+                futures.append(
+                    executor.submit(sample_csv, path=url, outf=outf, overwrite=False)
+                )
+
+        for future in concurrent.futures.as_completed(futures):
+            _ = future.result()  # correctly raise exceptions
+
+
+def query_gwascatalog_api(gcst_path, tsv_path):
+    """Get GCSTs from the GWAS Catalog API"""
+    tsv_urls = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        with open(gcst_path) as f:
+            next(f)  # skip the header comment
+            gcsts = f.readlines()
+        print("Querying GCSTs...")
+        futures = [executor.submit(get_sumstat_from_gcst, gcst) for gcst in gcsts]
+        for future in concurrent.futures.as_completed(futures):
+            url = {"id": "gcsts", "urls": [future.result()]}
+            tsv_urls.append(url)
+
+    # get gcsts for pubmed IDs
+    pubmed_links = [
+        {"id": str(pubmed_id), "urls": get_sumstats_from_pubmed_id(pubmed_id)}
+        for pubmed_id in PUBMED_IDS
+    ]
+    tsv_urls.extend(pubmed_links)
+
+    with open(tsv_path, "w") as f:
+        json.dump(tsv_urls, f, ensure_ascii=False, indent=4)
+
+
+def main():
+    script_dir = pathlib.Path(__file__).parent.resolve()
+    gcsts = script_dir / pathlib.Path("gcsts.txt")
+    tsv_urls = script_dir / pathlib.Path("urls.json")
+
+    # get sumstat file URLs from the GWAS Catalog API
+    if not tsv_urls.exists():
+        query_gwascatalog_api(gcst_path=gcsts, tsv_path=tsv_urls)
+    else:
+        with open(tsv_urls) as f:
+            tsv_urls = json.load(f)
+
+    # randomly sample the URLs with duckdb and write sumstats to the tests data directory
+    download_sumstats(tsv_urls)
 
 
 if __name__ == "__main__":
